@@ -31,10 +31,10 @@ const Html5Player = forwardRef(function Html5Player(
   useImperativeHandle(ref, () => ({
     async play() {
       try {
-        await videoRef.current.play();       // may be blocked until user gesture
+        await videoRef.current.play(); // may be blocked until user gesture
         setNeedUserStart(false);
       } catch (e) {
-        // Autoplay blocked — show overlay to ask for a manual click once
+        // Autoplay blocked — ask the user to click once
         setNeedUserStart(true);
         setLastError(e?.message || String(e));
       }
@@ -62,15 +62,10 @@ const Html5Player = forwardRef(function Html5Player(
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    const handlePlay = () => {
-      if (!suppressRef.current) onLocalPlay?.();
-    };
-    const handlePause = () => {
-      if (!suppressRef.current) onLocalPause?.();
-    };
-    const handleSeeked = () => {
-      if (!suppressRef.current) onLocalSeek?.(v.currentTime);
-    };
+    const handlePlay = () => { if (!suppressRef.current) onLocalPlay?.(); };
+    const handlePause = () => { if (!suppressRef.current) onLocalPause?.(); };
+    const handleSeeked = () => { if (!suppressRef.current) onLocalSeek?.(v.currentTime); };
+
     v.addEventListener("play", handlePlay);
     v.addEventListener("pause", handlePause);
     v.addEventListener("seeked", handleSeeked);
@@ -93,16 +88,26 @@ const Html5Player = forwardRef(function Html5Player(
 
   return (
     <div className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden flex items-center justify-center">
-      {/* Native controls for reliable user gesture; crossOrigin helps when the host allows CORS */}
+      {/* Native controls for reliable user gesture; crossOrigin helps when host allows CORS */}
       <video
         ref={videoRef}
-        src={url}
         className="w-full h-full"
         preload="metadata"
         playsInline
         controls
         crossOrigin="anonymous"
-      />
+        onError={() => {
+          const v = videoRef.current;
+          const code = v?.error?.code; // 1=aborted, 2=network, 3=decode, 4=src not supported
+          console.warn("Video error code:", code, v?.error);
+          setLastError(`HTMLMediaError code ${code || "?"}`);
+          setNeedUserStart(false);
+        }}
+      >
+        {/* Explicit MIME helps some browsers */}
+        <source src={url} type="video/mp4" />
+        Your browser does not support HTML5 video.
+      </video>
 
       {/* Overlay prompt when autoplay is blocked */}
       {needUserStart && (
@@ -116,10 +121,10 @@ const Html5Player = forwardRef(function Html5Player(
         </button>
       )}
 
-      {/* Tiny hint for codec/CORS issues */}
-      {lastError && needUserStart && (
-        <div className="absolute bottom-2 left-2 right-2 text-[10px] text-white/80">
-          If it still won't start, ensure the MP4 uses H.264/AAC and the server allows CORS.
+      {/* Small hint for codec/CORS errors */}
+      {lastError && (
+        <div className="absolute bottom-2 left-2 right-2 text-[11px] text-white/80 px-2">
+          Couldn’t start this MP4. Check codecs (H.264/AAC) and server headers (Content-Type/CORS/Accept-Ranges).
         </div>
       )}
     </div>

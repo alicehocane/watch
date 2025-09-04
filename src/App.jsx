@@ -20,7 +20,7 @@ const DRIFT_THRESHOLD=0.6
 const timeNowMs=()=>Date.now()
 
 const Html5Player = forwardRef(function Html5Player(
-  { url, onLocalPlay, onLocalPause, onLocalSeek },
+  { url, onLocalPlay, onLocalPause, onLocalSeek, onUserReady },
   ref
 ) {
   const videoRef = useRef(null);
@@ -28,28 +28,26 @@ const Html5Player = forwardRef(function Html5Player(
   const [needUserStart, setNeedUserStart] = useState(false);
   const [lastError, setLastError] = useState(null);
 
+  // Try muted autoplay first; if blocked, show overlay
   useImperativeHandle(ref, () => ({
     async play() {
       try {
-        await videoRef.current.play(); // may be blocked until user gesture
+        if (videoRef.current) videoRef.current.muted = true; // allow autoplay
+        await videoRef.current.play();
         setNeedUserStart(false);
+        setLastError(null);
       } catch (e) {
-        // Autoplay blocked — ask the user to click once
         setNeedUserStart(true);
         setLastError(e?.message || String(e));
       }
     },
-    pause() {
-      videoRef.current.pause();
-    },
+    pause() { videoRef.current.pause(); },
     seek(sec) {
       suppressRef.current = true;
       videoRef.current.currentTime = sec;
       setTimeout(() => (suppressRef.current = false), 0);
     },
-    getCurrentTime() {
-      return videoRef.current?.currentTime || 0;
-    },
+    getCurrentTime() { return videoRef.current?.currentTime || 0; },
     isPlaying() {
       return !!(
         videoRef.current &&
@@ -62,9 +60,16 @@ const Html5Player = forwardRef(function Html5Player(
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    const handlePlay = () => { if (!suppressRef.current) onLocalPlay?.(); };
-    const handlePause = () => { if (!suppressRef.current) onLocalPause?.(); };
-    const handleSeeked = () => { if (!suppressRef.current) onLocalSeek?.(v.currentTime); };
+
+    const handlePlay = () => {
+      if (!suppressRef.current) onLocalPlay?.();
+    };
+    const handlePause = () => {
+      if (!suppressRef.current) onLocalPause?.();
+    };
+    const handleSeeked = () => {
+      if (!suppressRef.current) onLocalSeek?.(v.currentTime);
+    };
 
     v.addEventListener("play", handlePlay);
     v.addEventListener("pause", handlePause);
@@ -78,8 +83,11 @@ const Html5Player = forwardRef(function Html5Player(
 
   const userStart = async () => {
     try {
+      if (videoRef.current) videoRef.current.muted = false; // restore sound after gesture
       await videoRef.current.play();
       setNeedUserStart(false);
+      setLastError(null);
+      onUserReady?.(); // let the app know the user interacted and playback can be synced
     } catch (e) {
       setNeedUserStart(true);
       setLastError(e?.message || String(e));
@@ -88,7 +96,6 @@ const Html5Player = forwardRef(function Html5Player(
 
   return (
     <div className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden flex items-center justify-center">
-      {/* Native controls for reliable user gesture; crossOrigin helps when host allows CORS */}
       <video
         ref={videoRef}
         className="w-full h-full"
@@ -99,10 +106,10 @@ const Html5Player = forwardRef(function Html5Player(
         onError={() => {
           const v = videoRef.current;
           const code = v?.error?.code; // 1=aborted, 2=network, 3=decode, 4=src not supported
-          console.warn("Video error code:", code, v?.error);
           setLastError(`HTMLMediaError code ${code || "?"}`);
           setNeedUserStart(false);
         }}
+        onLoadedMetadata={() => setLastError(null)}
       >
         {/* Explicit MIME helps some browsers */}
         <source src={url} type="video/mp4" />
@@ -124,7 +131,7 @@ const Html5Player = forwardRef(function Html5Player(
       {/* Small hint for codec/CORS errors */}
       {lastError && (
         <div className="absolute bottom-2 left-2 right-2 text-[11px] text-white/80 px-2">
-          Couldn’t start this MP4. Check codecs (H.264/AAC) and server headers (Content-Type/CORS/Accept-Ranges).
+          {lastError}. If it persists, ensure H.264/AAC and server headers (Content-Type/CORS/Accept-Ranges).
         </div>
       )}
     </div>

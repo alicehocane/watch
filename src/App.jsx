@@ -1,7 +1,6 @@
 // src/App.jsx
 // WatchTogether – Vercel-ready (Vite + React)
-// - Firebase Realtime Database for rooms, playback sync, and chat
-// - YouTube and direct MP4 support (with tolerant autoplay + user gating)
+// Firebase Realtime DB + YouTube + MP4 (handles non-seekable sources)
 
 import React, {
   useEffect,
@@ -71,16 +70,17 @@ function extractYouTubeId(url) {
 const DRIFT_THRESHOLD = 0.6;
 
 // ==============================
-// ▶️ Generic HTML5 Video Player (tolerant + user-ready callback)
+// ▶️ Generic HTML5 Video Player (handles non-seekable MP4)
 // ==============================
 const Html5Player = forwardRef(function Html5Player(
-  { url, onLocalPlay, onLocalPause, onLocalSeek, onUserReady },
+  { url, onLocalPlay, onLocalPause, onLocalSeek, onUserReady, onSeekability },
   ref
 ) {
   const videoRef = useRef(null);
   const suppressRef = useRef(false);
   const [needUserStart, setNeedUserStart] = useState(false);
   const [lastError, setLastError] = useState(null);
+  const [canSeek, setCanSeek] = useState(false);
 
   useImperativeHandle(ref, () => ({
     // Try muted autoplay first; browsers often allow it.
@@ -99,6 +99,7 @@ const Html5Player = forwardRef(function Html5Player(
       videoRef.current.pause();
     },
     seek(sec) {
+      if (!canSeek) return; // gracefully no-op if server won't allow seeking
       suppressRef.current = true;
       videoRef.current.currentTime = sec;
       setTimeout(() => (suppressRef.current = false), 0);
@@ -113,11 +114,15 @@ const Html5Player = forwardRef(function Html5Player(
         !videoRef.current.ended
       );
     },
+    supportsSeeking() {
+      return canSeek;
+    },
   }));
 
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
+
     const handlePlay = () => {
       if (!suppressRef.current) onLocalPlay?.();
     };
@@ -127,15 +132,31 @@ const Html5Player = forwardRef(function Html5Player(
     const handleSeeked = () => {
       if (!suppressRef.current) onLocalSeek?.(v.currentTime);
     };
+    const updateSeekability = () => {
+      // Browser exposes seekable ranges. Many CDNs require Accept-Ranges: bytes for this.
+      const seekable =
+        v.seekable && v.seekable.length > 0 && v.duration !== Infinity;
+      setCanSeek(!!seekable);
+      onSeekability?.(!!seekable);
+    };
+
     v.addEventListener("play", handlePlay);
     v.addEventListener("pause", handlePause);
     v.addEventListener("seeked", handleSeeked);
+    v.addEventListener("loadedmetadata", updateSeekability);
+    v.addEventListener("progress", updateSeekability);
+
+    // initial attempt (some browsers provide seekable only after metadata)
+    updateSeekability();
+
     return () => {
       v.removeEventListener("play", handlePlay);
       v.removeEventListener("pause", handlePause);
       v.removeEventListener("seeked", handleSeeked);
+      v.removeEventListener("loadedmetadata", updateSeekability);
+      v.removeEventListener("progress", updateSeekability);
     };
-  }, [onLocalPlay, onLocalPause, onLocalSeek]);
+  }, [onLocalPlay, onLocalPause, onLocalSeek, onSeekability]);
 
   const userStart = async () => {
     try {
@@ -158,11 +179,10 @@ const Html5Player = forwardRef(function Html5Player(
         preload="metadata"
         playsInline
         controls
-        crossOrigin="anonymous"
+        // NOTE: do NOT set crossOrigin here since the host doesn't send CORS.
         onError={() => {
           const v = videoRef.current;
           const code = v?.error?.code; // 1=aborted, 2=network, 3=decode, 4=src unsupported
-          // Show precise error – helps distinguish codec vs CORS vs URL
           // eslint-disable-next-line no-console
           console.warn("Video error code:", code, v?.error);
           setLastError(`HTMLMediaError code ${code || "?"}`);
@@ -190,7 +210,7 @@ const Html5Player = forwardRef(function Html5Player(
       {/* Small hint for codec/CORS errors */}
       {lastError && (
         <div className="absolute bottom-2 left-2 right-2 text-[11px] text-white/80 px-2">
-          {lastError}. If it persists, ensure H.264/AAC and server headers (Content-Type/CORS/Accept-Ranges).
+          {lastError}. If it persists, ensure H.264/AAC and server headers.
         </div>
       )}
     </div>
@@ -238,6 +258,9 @@ const YouTubePlayer = forwardRef(function YouTubePlayer(
     isPlaying() {
       return ready.current ? player.current.getPlayerState() === 1 : false;
     },
+    supportsSeeking() {
+      return true;
+    },
   }));
 
   useEffect(() => {
@@ -249,9 +272,7 @@ const YouTubePlayer = forwardRef(function YouTubePlayer(
         videoId,
         playerVars: { rel: 0, modestbranding: 1, controls: 0 },
         events: {
-          onReady: () => {
-            ready.current = true;
-          },
+          onReady: () => (ready.current = true),
           onStateChange: (e) => {
             if (!ready.current || suppress.current) return;
             if (e.data === 1) onLocalPlay?.();
@@ -293,8 +314,10 @@ export default function App() {
   const [allowEveryone, setAllowEveryone] = useState(false);
   const [canControl, setCanControl] = useState(false);
 
-  // Gate HTML5 sync until viewer interacted (avoids “back-and-forth” before user click)
+  // Gate HTML5 sync until viewer interacted (avoids seeks before a click)
   const [viewerReady, setViewerReady] = useState(false);
+  // Track whether current source is seekable
+  const [sourceSeekable, setSourceSeekable] = useState(true);
 
   // Chat
   const [nickname, setNickname] = useState(
@@ -328,6 +351,7 @@ export default function App() {
 
     // reset viewerReady when joining a new room or changing URL
     setViewerReady(false);
+    setSourceSeekable(true);
 
     const roomRef = ref(db, `rooms/${roomId}`);
     get(roomRef).then((s) => {
@@ -379,7 +403,7 @@ export default function App() {
     };
   }, [db, roomId, myId, nickname]);
 
-  // Heartbeat: only when controller is allowed and actually playing.
+  // Heartbeat: when controller is allowed and actually playing.
   // For HTML5, also require viewerReady so we don't force-seek before user clicks.
   useEffect(() => {
     if (!roomId) return;
@@ -421,6 +445,7 @@ export default function App() {
     setAllowEveryone(false);
     setCanControl(true);
     setViewerReady(false);
+    setSourceSeekable(true);
   };
 
   // Share link
@@ -465,7 +490,10 @@ export default function App() {
     const cur = playerRef.current.getCurrentTime();
     const drift = Math.abs(should - cur);
 
-    if (drift > DRIFT_THRESHOLD) {
+    // If the source isn't seekable (like your URL), avoid programmatic seeking
+    const canSeek = usingYT || playerRef.current.supportsSeeking?.() || false;
+
+    if (canSeek && drift > DRIFT_THRESHOLD) {
       playerRef.current.seek(should);
     }
     const playing = playerRef.current.isPlaying();
@@ -484,6 +512,12 @@ export default function App() {
   };
   const handleSeekDelta = async (d) => {
     if (!canControl || !playerRef.current) return;
+
+    // Respect seekability (disable jumps if server doesn't support it)
+    const canSeek =
+      isYouTubeUrl(videoUrl) || playerRef.current.supportsSeeking?.();
+    if (!canSeek) return;
+
     const t = Math.max(0, playerRef.current.getCurrentTime() + d);
     playerRef.current.seek(t);
     await broadcastPlayback();
@@ -593,7 +627,8 @@ export default function App() {
               onLocalPlay={handlePlay}
               onLocalPause={handlePause}
               onLocalSeek={() => broadcastPlayback()}
-              onUserReady={() => setViewerReady(true)} // 👈 unlock sync after first click
+              onUserReady={() => setViewerReady(true)}       // unlock sync after first click
+              onSeekability={(seekable) => setSourceSeekable(!!seekable)}
             />
           )}
 
@@ -601,11 +636,18 @@ export default function App() {
           <div className="bg-white rounded-2xl shadow p-4 flex flex-wrap items-center gap-3">
             <button
               onClick={() => handleSeekDelta(-10)}
-              disabled={!canControl}
+              disabled={!canControl || (!usingYT && !sourceSeekable)}
               className={`px-4 py-3 rounded-2xl bg-gray-100 ${
-                canControl ? "" : "opacity-50 cursor-not-allowed"
+                canControl && (usingYT || sourceSeekable)
+                  ? ""
+                  : "opacity-50 cursor-not-allowed"
               }`}
               aria-label="Back 10 seconds"
+              title={
+                !usingYT && !sourceSeekable
+                  ? "Seeking is disabled for this video source"
+                  : "Back 10s"
+              }
             >
               ⏪ 10s
             </button>
@@ -636,11 +678,18 @@ export default function App() {
 
             <button
               onClick={() => handleSeekDelta(10)}
-              disabled={!canControl}
+              disabled={!canControl || (!usingYT && !sourceSeekable)}
               className={`px-4 py-3 rounded-2xl bg-gray-100 ${
-                canControl ? "" : "opacity-50 cursor-not-allowed"
+                canControl && (usingYT || sourceSeekable)
+                  ? ""
+                  : "opacity-50 cursor-not-allowed"
               }`}
               aria-label="Forward 10 seconds"
+              title={
+                !usingYT && !sourceSeekable
+                  ? "Seeking is disabled for this video source"
+                  : "Forward 10s"
+              }
             >
               10s ⏩
             </button>
@@ -663,6 +712,11 @@ export default function App() {
             <div className="text-sm sm:text-base">
               <div className="font-semibold">Room: {roomId}</div>
               <div className="text-gray-500 truncate">Video: {videoUrl}</div>
+              {!usingYT && !sourceSeekable && (
+                <div className="text-xs text-amber-700 mt-1">
+                  This source doesn’t support seeking; sync will match play/pause only.
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-3">
               <label className="flex items-center gap-2 text-sm sm:text-base">
@@ -694,8 +748,8 @@ export default function App() {
           </div>
 
           <div className="text-xs text-gray-400">
-            Tip: For MP4 links, click Play once if your browser blocks autoplay,
-            then press Sync.
+            Tip: Some MP4 hosts don’t allow seeking. We’ll keep everyone in sync
+            on play/pause; use YouTube or a seekable host for perfect scrubbing.
           </div>
         </section>
 

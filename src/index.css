@@ -1,0 +1,6 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Simple focus ring for accessibility */
+:focus { outline: none; box-shadow: 0 0 0 3px rgba(79,70,229,.4); border-radius: .75rem }

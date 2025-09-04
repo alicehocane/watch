@@ -19,12 +19,112 @@ function extractYouTubeId(url){ try{const u=new URL(url); if(u.hostname==='youtu
 const DRIFT_THRESHOLD=0.6
 const timeNowMs=()=>Date.now()
 
-const Html5Player = forwardRef(function Html5Player({ url, onLocalPlay, onLocalPause, onLocalSeek }, ref){
-  const videoRef=useRef(null); const suppress=useRef(false)
-  useImperativeHandle(ref, ()=>({ async play(){ try{await videoRef.current.play()}catch{} }, pause(){ videoRef.current.pause() }, seek(s){ suppress.current=true; videoRef.current.currentTime=s; setTimeout(()=>suppress.current=false,0)}, getCurrentTime(){ return videoRef.current?.currentTime||0 }, isPlaying(){ return !!(videoRef.current && !videoRef.current.paused && !videoRef.current.ended) } }))
-  useEffect(()=>{ const v=videoRef.current; if(!v) return; const onP=()=>!suppress.current&&onLocalPlay?.(); const onPa=()=>!suppress.current&&onLocalPause?.(); const onS=()=>!suppress.current&&onLocalSeek?.(v.currentTime); v.addEventListener('play',onP); v.addEventListener('pause',onPa); v.addEventListener('seeked',onS); return()=>{ v.removeEventListener('play',onP); v.removeEventListener('pause',onPa); v.removeEventListener('seeked',onS) } },[onLocalPlay,onLocalPause,onLocalSeek])
-  return (<div className="w-full aspect-video bg-black rounded-2xl overflow-hidden flex items-center justify-center"><video ref={videoRef} src={url} className="w-full h-full" preload="metadata" playsInline/></div>)
-})
+const Html5Player = forwardRef(function Html5Player(
+  { url, onLocalPlay, onLocalPause, onLocalSeek },
+  ref
+) {
+  const videoRef = useRef(null);
+  const suppressRef = useRef(false);
+  const [needUserStart, setNeedUserStart] = useState(false);
+  const [lastError, setLastError] = useState(null);
+
+  useImperativeHandle(ref, () => ({
+    async play() {
+      try {
+        await videoRef.current.play();       // may be blocked until user gesture
+        setNeedUserStart(false);
+      } catch (e) {
+        // Autoplay blocked — show overlay to ask for a manual click once
+        setNeedUserStart(true);
+        setLastError(e?.message || String(e));
+      }
+    },
+    pause() {
+      videoRef.current.pause();
+    },
+    seek(sec) {
+      suppressRef.current = true;
+      videoRef.current.currentTime = sec;
+      setTimeout(() => (suppressRef.current = false), 0);
+    },
+    getCurrentTime() {
+      return videoRef.current?.currentTime || 0;
+    },
+    isPlaying() {
+      return !!(
+        videoRef.current &&
+        !videoRef.current.paused &&
+        !videoRef.current.ended
+      );
+    },
+  }));
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const handlePlay = () => {
+      if (!suppressRef.current) onLocalPlay?.();
+    };
+    const handlePause = () => {
+      if (!suppressRef.current) onLocalPause?.();
+    };
+    const handleSeeked = () => {
+      if (!suppressRef.current) onLocalSeek?.(v.currentTime);
+    };
+    v.addEventListener("play", handlePlay);
+    v.addEventListener("pause", handlePause);
+    v.addEventListener("seeked", handleSeeked);
+    return () => {
+      v.removeEventListener("play", handlePlay);
+      v.removeEventListener("pause", handlePause);
+      v.removeEventListener("seeked", handleSeeked);
+    };
+  }, [onLocalPlay, onLocalPause, onLocalSeek]);
+
+  const userStart = async () => {
+    try {
+      await videoRef.current.play();
+      setNeedUserStart(false);
+    } catch (e) {
+      setNeedUserStart(true);
+      setLastError(e?.message || String(e));
+    }
+  };
+
+  return (
+    <div className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden flex items-center justify-center">
+      {/* Native controls for reliable user gesture; crossOrigin helps when the host allows CORS */}
+      <video
+        ref={videoRef}
+        src={url}
+        className="w-full h-full"
+        preload="metadata"
+        playsInline
+        controls
+        crossOrigin="anonymous"
+      />
+
+      {/* Overlay prompt when autoplay is blocked */}
+      {needUserStart && (
+        <button
+          onClick={userStart}
+          className="absolute inset-0 m-auto h-14 w-56 rounded-2xl bg-indigo-600 text-white text-lg font-semibold shadow-lg"
+          aria-label="Click to start video"
+          style={{ width: "14rem" }}
+        >
+          ▶️ Click to start
+        </button>
+      )}
+
+      {/* Tiny hint for codec/CORS issues */}
+      {lastError && needUserStart && (
+        <div className="absolute bottom-2 left-2 right-2 text-[10px] text-white/80">
+          If it still won't start, ensure the MP4 uses H.264/AAC and the server allows CORS.
+        </div>
+      )}
+    </div>
+  );
+});
 
 const YouTubePlayer = forwardRef(function YouTubePlayer({ videoId, onLocalPlay, onLocalPause, onLocalSeek }, ref){
   const container=useRef(null); const player=useRef(null); const ready=useRef(false); const suppress=useRef(false)
